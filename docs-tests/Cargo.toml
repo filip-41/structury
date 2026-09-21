@@ -1,0 +1,16 @@
+[package]
+name = "structury-docs-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish = false
+description = "Compiles the workspace README and the guide pages as doctests"
+
+[dependencies]
+structury = { path = "../core" }
+structury-json = { path = "../json" }
+
+[lints]
+workspace = true

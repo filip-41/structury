@@ -1,0 +1,70 @@
+[package]
+name = "structury-json-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+structury = { path = "../../core" }
+structury-json = { path = ".." }
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "encode_roundtrip"
+path = "fuzz_targets/encode_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "partition_alignment"
+path = "fuzz_targets/partition_alignment.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "shape_decline"
+path = "fuzz_targets/shape_decline.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scan_vs_dom"
+path = "fuzz_targets/scan_vs_dom.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json5_filter"
+path = "fuzz_targets/json5_filter.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "edit_roundtrip"
+path = "fuzz_targets/edit_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
+resolver = "3"
+
+[profile.release]
+debug = 1

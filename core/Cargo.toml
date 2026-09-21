@@ -1,0 +1,17 @@
+[package]
+name = "structury"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Format-neutral demand, values, and host seam for the structury codec family"
+readme = "README.md"
+keywords = ["json", "codec", "demand"]
+categories = ["encoding", "no-std"]
+
+[features]
+byte-scan = []
+
+[lints]
+workspace = true

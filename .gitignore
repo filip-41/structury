@@ -1,0 +1,13 @@
+# Build products
+/target/
+**/target/
+/target-*/
+
+# OS / editor
+.DS_Store
+
+# cargo-fuzz build products and generated corpora (corpus is regenerated per run)
+**/fuzz/target/
+**/fuzz/artifacts/
+**/fuzz/coverage/
+**/fuzz/corpus/
