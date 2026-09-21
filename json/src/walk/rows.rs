@@ -1,9 +1,9 @@
 use super::{
     Answer, ByteRange, ColumnCell, Columns, Demand, Dialect, Document, Hit, Members, Name, RecordSink,
-    ResolvedPredicate, Scan, String, Vec, View, Walker, flatten_here, pred_on_members,
+    ResolvedPredicate, Scan, String, TraceSink, Vec, View, Walker, flatten_here, pred_on_members,
 };
 
-impl<'src, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, '_, '_, S, CONTROLLED, R> {
+impl<'src, S: Scan, R: RecordSink, const CONTROLLED: bool, T: TraceSink> Walker<'src, '_, '_, S, CONTROLLED, R, T> {
     /// Begin a row-accumulating element loop: move each row hit's accumulator
     /// onto `rows` and seed its slot for the element's own answer.
     pub(super) fn open_rows(&mut self, hits: &[Hit<'_>], marks: &mut [Answer<'src>]) -> usize {

@@ -111,7 +111,7 @@ a nested demand and reads the located value.
 
 The JSON codec exposes functions for each direction of conversion.
 
-- `scan` runs one pass over a request, and `scan_controlled` also polls a `Control`. `scan_each` visits one framed record at a time, and `validate` reports whether the bytes parse under a dialect. `materialize` turns an answer into a `Form`, and `parse` does the same for a whole input.
+- `scan` runs one pass over a request, and `scan_controlled` also polls a `Control`; `scan_traced` and `scan_traced_controlled` return the same answers with a `Trace` of marks, skips, and stops. `scan_each` visits one framed record at a time, and `validate` reports whether the bytes parse under a dialect. `materialize` turns an answer into a `Form`, and `parse` does the same for a whole input.
 - `encode` writes a `Value` or a validated `Document` to bytes. A document passes the write gate only when a `Strict` scan validated every value.
 - `edit` locates a list of `Edit` values in one `Strict` pass and applies byte splices. When a splice cannot express a change, `edit` falls back to re-encoding a DOM. `edit_document` keeps comment facts and returns a `Document`.
 - `Plan` cuts a source into ranges for the host to scan, and `Drive` and `stitch` fold the part results. `ValuePlan` plans a parallel encode of a top-level array.

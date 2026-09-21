@@ -52,6 +52,15 @@ functions pack whole values into morsels of at least a target byte size without
 splitting a record. The shared packer is `pack_runs`. The functions are covered
 in [Sharding](07-sharding.md).
 
+For the feed path, the framing module exposes two holdback helpers for a host
+that pulls a growing buffer. `complete_prefix_len` returns the leading bytes
+that hold complete newline-terminated frames for NDJSON and JSON-seq, so the
+host feeds the prefix and holds the unterminated tail until it completes.
+`adjacent_prefix_len` returns the longest prefix of adjacent values that is
+complete, holding back a value that touches the end without trailing trivia
+because it may still extend. The host drains the prefix, scans it, and scans
+the remainder whole when the stream ends.
+
 One consequence for `Text` needs care. Adjacent, NDJSON, and JSON-seq parse a
 stream of values, so a key-scoped path on a stream is a type error because the
 virtual array has no keyed member. Trailing data in `Text` is `json.syntax`

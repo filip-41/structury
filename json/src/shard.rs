@@ -1245,7 +1245,7 @@ fn scan_concat_window<'src, const CONTROLLED: bool>(
             crate::walk::check_control(control, pos)?;
         }
         let is_object = src.get(pos) == Some(&b'{');
-        let (mut answers, next, _) = crate::walk::scan_root::<CONTROLLED>(
+        let (mut answers, next, _, _) = crate::walk::scan_root::<CONTROLLED, crate::trace::NoTrace>(
             src,
             pos,
             mapped,
@@ -1255,6 +1255,7 @@ fn scan_concat_window<'src, const CONTROLLED: bool>(
             &facts,
             false,
             control,
+            crate::trace::NoTrace,
         )?;
         apply_row_law(src, mapped, &mut answers, is_object);
         per_value.push(answers);

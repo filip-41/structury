@@ -123,16 +123,33 @@ Once through the gate, `write_document` has two modes.
 
 `Source::Value` always takes the canonical walk with `write_value`, which
 writes the compact or pretty form of the tree. A JSON5 non-finite number is
-refused unless `opts.dialect` is Json5.
+refused unless `opts.dialect` is Json5. Both the value walk and the span
+emitter refuse past `MAX_NESTING` with a `nesting` limit error, so no output
+path recurses without a bound.
+
+### Parallel value encode
+
+A top-level array value also encodes in parallel without changing bytes.
+`plan_encode_value` in `json/src/encode_parallel.rs` cuts the array into
+`ItemRange` chunks, the host encodes each chunk with `encode_value_chunk` on
+its own thread, and `stitch_value_chunks` joins the parts with the separators
+and brackets. The plan falls back to `ValuePlan::Serial` for a non-array, a
+framed write, or fewer than `MIN_ITEMS_PER_PART` items per part, so a small
+write never pays for fan-out. The [overview](01-overview.md) shows the host
+loop.
 
 ### Options
 
-`EncodeOptions` in `json/src/scan.rs` holds the settings.
+`EncodeOptions` in `json/src/encode.rs` holds the settings.
 
 - `pretty` and `indent` with `Indent::Spaces(u8)` or `Tab` choose formatting.
 - `framing` with `ItemFraming::None`, `NdjsonLf`, or `JsonSeq` writes a
   terminator, or a `0x1E` prefix plus `\n` for JSON-seq.
 - `verbatim` controls the memcpy path for a `Document`.
+- `sort_keys` sorts object members by key on a value write, stably so duplicate
+  keys keep their authored order.
+- `ascii` escapes non-ASCII as `\uXXXX` with surrogate pairs past the BMP on a
+  value write.
 - `dialect` selects the grammar that the canonical walk reads and whether an
   authored glyph is re-emitted, and it also gates the verbatim path, which
   refuses a document validated under another dialect.

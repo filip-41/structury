@@ -320,7 +320,7 @@ away at compile time, so the checks cost nothing when they are not wanted.
   caller
     │  bytes + ScanRequest { input, demands, strictness, dialect, … }
     ▼
-  scan / scan_controlled / scan_each        (json/src/scan.rs)
+  scan / scan_controlled / scan_each / scan_traced   (json/src/scan.rs)
     │
     │  one pass; each demand matched against the walk
     ▼

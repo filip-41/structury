@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 fn assert_strategies_agree(src: &[u8], demand: &Demand) {
     for strictness in [Strictness::Lazy, Strictness::Structural, Strictness::Strict] {
         let one = core::slice::from_ref(demand);
-        let new = scan_root_with::<RfcScan, NoRec, false>(
+        let new = scan_root_with::<RfcScan, NoRec, false, NoTrace>(
             src,
             0,
             one,
@@ -20,8 +20,9 @@ fn assert_strategies_agree(src: &[u8], demand: &Demand) {
             false,
             false,
             &NO_CONTROL,
+            NoTrace,
         );
-        let old = scan_root_with::<DialectScan, NoRec, false>(
+        let old = scan_root_with::<DialectScan, NoRec, false, NoTrace>(
             src,
             0,
             one,
@@ -32,9 +33,10 @@ fn assert_strategies_agree(src: &[u8], demand: &Demand) {
             false,
             false,
             &NO_CONTROL,
+            NoTrace,
         );
         match (new, old) {
-            (Ok((nm, ne, _, _)), Ok((om, oe, _, _))) => {
+            (Ok((nm, ne, _, _, _)), Ok((om, oe, _, _, _))) => {
                 assert_eq!(ne, oe, "end differs for {demand:?} {strictness:?} on {src:?}");
                 assert_eq!(
                     format!("{nm:?}"),

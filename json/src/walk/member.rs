@@ -1,9 +1,9 @@
 use super::{
     Answer, BTreeMap, ByteRange, Check, Dialect, Hit, Predicate, RecordSink, ResolvedPredicate, Scan, SmallErr, String,
-    Vec, View, Walker, apply_object_row, error, num_cmp, skip_trivia_here, span_eq_value,
+    TraceSink, Vec, View, Walker, apply_object_row, check_level, error, num_cmp, skip_trivia_here, span_eq_value,
 };
 
-impl<'src, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, '_, '_, S, CONTROLLED, R> {
+impl<'src, S: Scan, R: RecordSink, const CONTROLLED: bool, T: TraceSink> Walker<'src, '_, '_, S, CONTROLLED, R, T> {
     #[allow(clippy::too_many_lines)] // single-pass member loop; the retained-shape arm shares its locals
     pub(super) fn keep_object(
         &mut self,
@@ -70,6 +70,7 @@ impl<'src, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, '_, '_, 
                     let val_start = pos;
                     let check = if slot.is_some() { demanded } else { unread };
                     pos = S::skip_present_at(bytes, pos, check, child_depth, max, dialect)?;
+                    self.trace.note_skip(val_start, pos, check_level(check));
                     if let Some(slot) = slot {
                         let entry = &mut self.members.entries[slot];
                         entry.span = ByteRange::try_new(val_start, pos).expect("ordered");
@@ -94,6 +95,7 @@ impl<'src, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, '_, '_, 
                 let val_start = pos;
                 let check = if slot.is_some() { demanded } else { unread };
                 pos = S::skip_present_at(bytes, pos, check, child_depth, max, dialect)?;
+                self.trace.note_skip(val_start, pos, check_level(check));
                 if let Some(slot) = slot {
                     let entry = &mut self.members.entries[slot];
                     entry.span = ByteRange::try_new(val_start, pos).expect("ordered");
@@ -133,6 +135,7 @@ impl<'src, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, '_, '_, 
             // One strategy dispatch per member value; the kind-specific arms in
             // the scan would re-enter the same `value` match.
             pos = S::skip_present_at(bytes, pos, check, child_depth, max, dialect)?;
+            self.trace.note_skip(val_start, pos, check_level(check));
             seen_member = true;
             let span = ByteRange::try_new(val_start, pos).expect("ordered");
             let slot = if wanted {

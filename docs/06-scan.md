@@ -12,21 +12,28 @@ The JSON codec's scan lives in `json/src/scan.rs`, `json/src/lex/`, and
 
 ## The entry points
 
-A codec exposes entries for the common ways to run a scan: plain, controlled,
-per record, and validation only. The JSON codec has four in `json/src/scan.rs`.
-All four build a `ScanRequest` with `ScanRequest::new(input, demands)` plus
+A codec exposes entries for the common ways to run a scan: plain, traced,
+controlled, traced and controlled, per record, per record with issues, and
+validation only. The JSON codec has seven in `json/src/scan.rs`.
+All seven build a `ScanRequest` with `ScanRequest::new(input, demands)` plus
 `with_*` builders and dispatch on `JsonInput`.
 
 - `scan(src, req)` runs one pass with no host control.
+- `scan_traced(src, req)` runs the same pass and returns a `Trace` of what the
+  walk did alongside the answers.
 - `scan_controlled(src, req, control)` runs the same pass and polls `Control`
   at container and record boundaries.
+- `scan_traced_controlled(src, req, control)` combines the two.
 - `scan_each(src, req, visit)` visits each framed value and its answers as the
   walk goes, instead of returning one combined `ScanResult`.
+- `scan_each_with_issues(src, req, visit)` visits like `scan_each` and returns
+  the recovered per-record issues, so a malformed final record is reported
+  instead of dropped.
 - `validate(src, dialect)` runs a `Strict` scan for a `Whole` demand and
   discards the answers, so it returns only grammar success.
 
 ```text
-scan(src, req)
+scan / scan_traced / the controlled pair (one dispatch)
   │
   ├─ JsonInput::Text ─► scan_text   ──► walk::scan_root
   └─ Adjacent/Ndjson/JsonSeq ─► scan_stream ──► frames + per-record walker
@@ -44,6 +51,42 @@ request collects comment facts and holds a `Whole` demand. It drives the same
 walk with a `Recorder` sink so comments are recorded as trivia is skipped,
 instead of running a second pass. Facts are covered in
 [Framing and dialects](04-framing-and-dialects.md).
+
+## The walk trace
+
+The answers say what each demand produced, not what the walk read on the way.
+`scan_traced` and `scan_traced_controlled` return a `Trace` beside the answers:
+one `TraceEvent::Mark` per demand with the answer kind and span, a
+`TraceEvent::Skip` for each region located without being walked, and a
+`TraceEvent::Stop` when the all-slice early stop fires. `TraceCounters` counts
+the demands, answered marks, skip regions and their bytes, control polls, and
+stops. A skip carries a `CheckLevel`, either `Locate` or `Values`, and a region
+re-read at another level counts twice.
+
+Tracing follows the seam pattern of the control flag: the sink is a const
+generic over `NoTrace` and `Recorder` in `json/src/trace.rs`, so the plain
+entries compile it away. A refusal returns no partial trace, because the
+refusal offset lives on the error. A stream runs an extra walker for an
+`Index`-scoped demand, and its events append after the main walk's.
+
+```rust
+use structury::Demand;
+use structury_json::{CheckLevel, JsonInput, ScanRequest, TraceEvent, scan_traced};
+
+let demands = [Demand::path(vec![structury::Step::Key("a".into())])];
+let request = ScanRequest::new(JsonInput::Text, &demands);
+let (_result, trace) = scan_traced(br#"{"a":1,"b":2}"#, &request).expect("valid");
+let skips: Vec<_> = trace
+    .events
+    .iter()
+    .filter_map(|event| match event {
+        TraceEvent::Skip { check, .. } => Some(*check),
+        _ => None,
+    })
+    .collect();
+// The wanted member locates at value-check level, the unread one at locate level.
+assert_eq!(skips, vec![CheckLevel::Values, CheckLevel::Locate]);
+```
 
 ## The lex layer
 

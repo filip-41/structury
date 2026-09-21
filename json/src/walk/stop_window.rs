@@ -46,7 +46,7 @@ fn fingerprint(answer: &Answer<'_>) -> String {
 }
 
 fn walk(src: &[u8], demands: &[Demand], allow_stop: bool) -> (Vec<String>, Vec<usize>, usize, bool) {
-    let (answers, end, stopped, _) = scan_root_with::<DialectScan, NoRec, false>(
+    let (answers, end, stopped, _, _) = scan_root_with::<DialectScan, NoRec, false, NoTrace>(
         src,
         0,
         demands,
@@ -57,6 +57,7 @@ fn walk(src: &[u8], demands: &[Demand], allow_stop: bool) -> (Vec<String>, Vec<u
         allow_stop,
         false,
         &NO_CONTROL,
+        NoTrace,
     )
     .expect("scan");
     let marks = answers.iter().map(fingerprint).collect();
