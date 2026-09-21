@@ -1,4 +1,4 @@
-//! Scan entries: [`validate`], [`scan`], [`scan_each`].
+//! Scan entries: [`validate`], [`scan`], [`scan_each`], [`scan_traced`].
 //!
 //! Trailing non-whitespace after one text value is `trailing-content`.
 //! A stream is a virtual array of its records.
@@ -11,6 +11,7 @@ use crate::dialect::Dialect;
 use crate::error;
 use crate::lex;
 use crate::lex::MAX_NESTING;
+use crate::trace::{NoTrace, Recorder, Trace, TraceSink, check_level};
 use crate::walk;
 
 /// How a source buffer holds JSON values. Format-owned: arrangement is codec identity.
@@ -201,13 +202,37 @@ pub fn validate(src: &[u8], dialect: Dialect) -> Result<(), structury::Error> {
 ///
 /// Grammar, shape, or empty input.
 pub fn scan<'src>(src: &'src [u8], req: &ScanRequest<'_>) -> Result<ScanResult<'src>, structury::Error> {
-    refuse_container_predicates(req.demands)?;
-    match req.input {
-        JsonInput::Text => scan_text::<false>(src, req, &walk::NO_CONTROL),
-        JsonInput::Adjacent | JsonInput::Ndjson | JsonInput::JsonSeq => {
-            scan_stream::<false>(src, req, &walk::NO_CONTROL)
-        }
-    }
+    dispatch::<false, NoTrace>(src, req, &walk::NO_CONTROL, NoTrace).map(|(result, _)| result)
+}
+
+/// One-pass scan with a walk trace: what each demand produced, what was
+/// skipped, and where the walk stopped early. Tracing the same request twice
+/// yields the same events.
+///
+/// On any refusal nothing is returned, including no partial trace; the
+/// refusal offset lives on the error.
+///
+/// ```
+/// use structury::Demand;
+/// use structury_json::{JsonInput, ScanRequest, scan_traced};
+///
+/// let demands = [Demand::Whole];
+/// let request = ScanRequest::new(JsonInput::Text, &demands);
+/// let (result, trace) = scan_traced(br#"{"a":1}"#, &request).expect("valid");
+/// assert_eq!(result.answers.len(), 1);
+/// assert_eq!(trace.counters.demands, 1);
+/// ```
+///
+/// # Errors
+///
+/// Grammar, shape, or empty input.
+pub fn scan_traced<'src>(
+    src: &'src [u8],
+    req: &ScanRequest<'_>,
+) -> Result<(ScanResult<'src>, Trace), structury::Error> {
+    let (result, mut trace) = dispatch::<false, Recorder>(src, req, &walk::NO_CONTROL, Recorder::new())?;
+    trace.record_marks(req.demands, &result.answers);
+    Ok((result, trace))
 }
 
 /// One-pass scan under a host [`structury::Control`]. The handle is polled once
@@ -222,10 +247,41 @@ pub fn scan_controlled<'src>(
     req: &ScanRequest<'_>,
     control: &structury::Control,
 ) -> Result<ScanResult<'src>, structury::Error> {
+    dispatch::<true, NoTrace>(src, req, control, NoTrace).map(|(result, _)| result)
+}
+
+/// [`scan_controlled`] with a walk trace. See [`scan_traced`].
+///
+/// On any refusal nothing is returned, including no partial trace; the
+/// refusal offset lives on the error.
+///
+/// # Errors
+///
+/// Grammar, shape, empty input, or a control stop.
+pub fn scan_traced_controlled<'src>(
+    src: &'src [u8],
+    req: &ScanRequest<'_>,
+    control: &structury::Control,
+) -> Result<(ScanResult<'src>, Trace), structury::Error> {
+    let (result, mut trace) = dispatch::<true, Recorder>(src, req, control, Recorder::new())?;
+    trace.record_marks(req.demands, &result.answers);
+    Ok((result, trace))
+}
+
+/// Shared dispatch for the four scan entries: `CONTROLLED` chooses the control
+/// polls, `T` the trace sink.
+fn dispatch<'src, const CONTROLLED: bool, T: TraceSink>(
+    src: &'src [u8],
+    req: &ScanRequest<'_>,
+    control: &structury::Control,
+    trace: T,
+) -> Result<(ScanResult<'src>, Trace), structury::Error> {
     refuse_container_predicates(req.demands)?;
     match req.input {
-        JsonInput::Text => scan_text::<true>(src, req, control),
-        JsonInput::Adjacent | JsonInput::Ndjson | JsonInput::JsonSeq => scan_stream::<true>(src, req, control),
+        JsonInput::Text => scan_text::<CONTROLLED, T>(src, req, control, trace),
+        JsonInput::Adjacent | JsonInput::Ndjson | JsonInput::JsonSeq => {
+            scan_stream::<CONTROLLED, T>(src, req, control, trace)
+        }
     }
 }
 
@@ -257,7 +313,7 @@ pub fn scan_each_with_issues<'src>(
     refuse_container_predicates(req.demands)?;
     match req.input {
         JsonInput::Text => {
-            let result = scan_text::<false>(src, req, &walk::NO_CONTROL)?;
+            let (result, _) = scan_text::<false, NoTrace>(src, req, &walk::NO_CONTROL, NoTrace)?;
             for answer in result.answers {
                 visit(answer);
             }
@@ -285,6 +341,7 @@ pub fn scan_each_with_issues<'src>(
                     req.dialect,
                     &facts,
                     &walk::NO_CONTROL,
+                    NoTrace,
                 )?)
             };
             let check = check_of(req.strictness);
@@ -301,6 +358,7 @@ pub fn scan_each_with_issues<'src>(
                         req.dialect,
                         &facts,
                         &walk::NO_CONTROL,
+                        NoTrace,
                     )?;
                     match walker.record(frame.start(), i, &plan.windows) {
                         Ok(()) => {
@@ -356,25 +414,26 @@ fn fuses_facts(req: &ScanRequest<'_>) -> bool {
     req.facts && req.dialect.has_comments() && req.demands.iter().any(|d| matches!(d, Demand::Whole))
 }
 
-fn scan_text<'src, const CONTROLLED: bool>(
+fn scan_text<'src, const CONTROLLED: bool, T: TraceSink>(
     src: &'src [u8],
     req: &ScanRequest<'_>,
     control: &structury::Control,
-) -> Result<ScanResult<'src>, structury::Error> {
+    trace: T,
+) -> Result<(ScanResult<'src>, Trace), structury::Error> {
     let bom = strip_bom(src);
     let pos = lex::skip_trivia(src, bom, req.dialect)?;
     if pos >= src.len() {
         return Err(error::expected_value(pos));
     }
     if fuses_facts(req) {
-        return scan_text_fused::<CONTROLLED>(src, bom, pos, req, control);
+        return scan_text_fused::<CONTROLLED, T>(src, bom, pos, req, control, trace);
     }
     let mut facts = Vec::new();
     collect_facts(src, 0, src.len(), req, &mut facts);
     // Structural and Lazy stop only when every demand is a bounded `Slice` on one
     // array. Strict never stops early.
     let allow_stop = !matches!(req.strictness, Strictness::Strict);
-    let (answers, end, stopped) = walk::scan_root::<CONTROLLED>(
+    let (answers, end, stopped, trace) = walk::scan_root::<CONTROLLED, T>(
         src,
         pos,
         req.demands,
@@ -384,6 +443,7 @@ fn scan_text<'src, const CONTROLLED: bool>(
         &facts,
         allow_stop,
         control,
+        trace,
     )?;
     if !stopped {
         let tail = lex::skip_trivia(src, end, req.dialect)?;
@@ -392,19 +452,20 @@ fn scan_text<'src, const CONTROLLED: bool>(
         }
     }
     debug_assert_eq!(answers.len(), req.demands.len());
-    Ok(ScanResult::new(answers, Vec::new()))
+    Ok((ScanResult::new(answers, Vec::new()), trace))
 }
 
 /// Exhaustive facts path: the walk records each comment as it skips trivia.
 /// The pre-root and trailing gaps are recorded here around it.
-fn scan_text_fused<'src, const CONTROLLED: bool>(
+fn scan_text_fused<'src, const CONTROLLED: bool, T: TraceSink>(
     src: &'src [u8],
     bom: usize,
     root_start: usize,
     req: &ScanRequest<'_>,
     control: &structury::Control,
-) -> Result<ScanResult<'src>, structury::Error> {
-    let (mut answers, end, stopped, inner) = walk::scan_root_fused::<CONTROLLED>(
+    trace: T,
+) -> Result<(ScanResult<'src>, Trace), structury::Error> {
+    let (mut answers, end, stopped, inner, trace) = walk::scan_root_fused::<CONTROLLED, T>(
         src,
         root_start,
         req.demands,
@@ -413,6 +474,7 @@ fn scan_text_fused<'src, const CONTROLLED: bool>(
         req.dialect,
         false,
         control,
+        trace,
     )?;
     // The root is the `Whole` demand's answer, not the first document answer.
     // A keyed sibling document can precede it. `fuses_facts` guarantees a
@@ -432,7 +494,7 @@ fn scan_text_fused<'src, const CONTROLLED: bool>(
         });
     let Some(root) = root else {
         debug_assert_eq!(answers.len(), req.demands.len());
-        return Ok(ScanResult::new(answers, Vec::new()));
+        return Ok((ScanResult::new(answers, Vec::new()), trace));
     };
     let tail = if stopped {
         end
@@ -451,7 +513,7 @@ fn scan_text_fused<'src, const CONTROLLED: bool>(
     facts.extend(trailing);
     attach_facts(&mut answers, facts);
     debug_assert_eq!(answers.len(), req.demands.len());
-    Ok(ScanResult::new(answers, Vec::new()))
+    Ok((ScanResult::new(answers, Vec::new()), trace))
 }
 
 /// Attach fused facts to every document answer.
@@ -485,13 +547,14 @@ fn attach_facts<'src>(answers: &mut [Answer<'src>], facts: Vec<Fact<'src>>) {
     clippy::too_many_lines,
     reason = "one framed-record loop: skip / index-scoped / persistent-row arms share the plan cursor"
 )]
-fn scan_stream<'src, const CONTROLLED: bool>(
+fn scan_stream<'src, const CONTROLLED: bool, T: TraceSink>(
     src: &'src [u8],
     req: &ScanRequest<'_>,
     control: &structury::Control,
-) -> Result<ScanResult<'src>, structury::Error> {
+    trace: T,
+) -> Result<(ScanResult<'src>, Trace), structury::Error> {
     if req.demands.iter().all(|d| matches!(d, Demand::Whole)) {
-        return scan_stream_whole::<CONTROLLED>(src, req, control);
+        return scan_stream_whole::<CONTROLLED, T>(src, req, control, trace);
     }
     let (ranges, mut issues) = frames_recovering(src, req.input, req.max_nesting, req.dialect)?;
     let mut facts = Vec::new();
@@ -503,10 +566,11 @@ fn scan_stream<'src, const CONTROLLED: bool>(
     let mut cursor = 0usize;
     let mut records = 0u64;
     let check = check_of(req.strictness);
+    let mut trace = Some(trace);
     let mut stream = if plan.every.is_empty() {
         None
     } else {
-        Some(walk::StreamWalker::<CONTROLLED>::new(
+        Some(walk::StreamWalker::<CONTROLLED, T>::new(
             src,
             &plan.every,
             plan.every_laws.clone(),
@@ -516,12 +580,14 @@ fn scan_stream<'src, const CONTROLLED: bool>(
             req.dialect,
             &facts,
             control,
+            trace.take().expect("stream trace held"),
         )?)
     };
+    let mut extra_traces = Vec::new();
     for (i, range) in ranges.iter().enumerate() {
         if let Some(extra) = plan.extra_at(i, &mut cursor) {
             // An `Index`-scoped demand applies to one record.
-            let mut walker = walk::StreamWalker::<CONTROLLED>::new(
+            let mut walker = walk::StreamWalker::<CONTROLLED, T>::new(
                 src,
                 &extra.demands,
                 extra.laws.clone(),
@@ -531,11 +597,15 @@ fn scan_stream<'src, const CONTROLLED: bool>(
                 req.dialect,
                 &facts,
                 control,
+                T::new(),
             )?;
             match walker.record(range.start(), i, &plan.windows) {
                 Ok(()) => {
                     records += 1;
                     walker.fold(&mut acc);
+                    if T::RECORDS {
+                        extra_traces.push(walker.take_trace());
+                    }
                 }
                 Err(e) if i + 1 == ranges.len() => {
                     issues.push(structury::Error::from(e).into());
@@ -561,10 +631,18 @@ fn scan_stream<'src, const CONTROLLED: bool>(
         }
         // No every-record row demand: strict validation still sees every value.
         if CONTROLLED {
+            if let Some(trace) = trace.as_mut() {
+                trace.note_poll();
+            }
             walk::check_control(control, range.start())?;
         }
         match crate::lex::skip_value(src, range.start(), check, req.max_nesting, req.dialect) {
-            Ok(_) => records += 1,
+            Ok(end) => {
+                records += 1;
+                if let Some(trace) = trace.as_mut() {
+                    trace.note_skip(range.start(), end, check_level(check));
+                }
+            }
             Err(e) if i + 1 == ranges.len() => {
                 issues.push(structury::Error::from(e).into());
                 break;
@@ -605,7 +683,14 @@ fn scan_stream<'src, const CONTROLLED: bool>(
             _ => {}
         }
     }
-    Ok(ScanResult::new(acc, issues))
+    let mut trace = match stream.as_mut() {
+        Some(stream) => stream.take_trace(),
+        None => trace.take().map(|mut t| t.take_trace()).unwrap_or_default(),
+    };
+    for extra in extra_traces {
+        trace.absorb(extra);
+    }
+    Ok((ScanResult::new(acc, issues), trace))
 }
 
 /// Per-record demand set for a stream scan, compiled once.
@@ -894,21 +979,25 @@ fn frames_recovering(
     }
 }
 
-fn scan_stream_whole<'src, const CONTROLLED: bool>(
+fn scan_stream_whole<'src, const CONTROLLED: bool, T: TraceSink>(
     src: &'src [u8],
     req: &ScanRequest<'_>,
     control: &structury::Control,
-) -> Result<ScanResult<'src>, structury::Error> {
+    mut trace: T,
+) -> Result<(ScanResult<'src>, Trace), structury::Error> {
     let check = check_of(req.strictness);
+    let level = check_level(check);
     let (ranges, mut issues) = frames_recovering(src, req.input, req.max_nesting, req.dialect)?;
     let mut columns = structury::Columns::new(src, alloc::vec![alloc::string::String::from("$")]);
     columns.reserve(ranges.len().min(1024));
     for (i, range) in ranges.iter().enumerate() {
         if CONTROLLED {
+            trace.note_poll();
             walk::check_control(control, range.start())?;
         }
         match crate::lex::skip_value(src, range.start(), check, req.max_nesting, req.dialect) {
             Ok(end) => {
+                trace.note_skip(range.start(), end, level);
                 if let Some(span) = structury::ByteRange::try_new(range.start(), end) {
                     columns.push(ColumnCell::Span(span));
                 }
@@ -923,7 +1012,7 @@ fn scan_stream_whole<'src, const CONTROLLED: bool>(
     // `Columns` shares its cells across clones.
     let n = req.demands.len();
     let answers = (0..n).map(|_| Answer::Columns(columns.clone())).collect();
-    Ok(ScanResult::new(answers, issues))
+    Ok((ScanResult::new(answers, issues), trace.take_trace()))
 }
 
 pub(crate) fn strip_bom(src: &[u8]) -> usize {

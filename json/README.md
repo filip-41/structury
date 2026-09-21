@@ -28,7 +28,9 @@ the walk must read anyway, and each demand gets its own answer. Unread regions
 are located without value checks under the default `Structural` setting, and
 `Lazy` leaves value checks to `materialize`. `Strict` validates every value and
 is required for a byte-preserving write. A stream is a virtual array of
-top-level values, and `scan_each` visits one record at a time.
+top-level values, and `scan_each` visits one record at a time. `scan_traced`
+and `scan_traced_controlled` run the same walks and return a `Trace` of marks,
+skips, and stops next to the answers.
 
 ### Oracles and predicates
 

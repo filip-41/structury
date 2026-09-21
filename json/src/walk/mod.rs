@@ -31,6 +31,7 @@ use crate::error::small::{self as error, SmallErr};
 use crate::facts::{NoRec, RecordSink, Recorder};
 use crate::lex::string::plain_double_quoted;
 use crate::lex::{self, Check};
+use crate::trace::{NoTrace, Trace, TraceSink, check_level};
 
 use self::dialect::DialectScan;
 use self::member::{Members, RowLayout, Wanted, member_bytes, member_name, pred_on_members, read_key};
@@ -82,7 +83,7 @@ pub(crate) fn check_control(control: &Control, at: usize) -> Result<(), SmallErr
 /// without a per-element heap allocation; wider demand sets spill to the heap.
 const CHILD_HITS: usize = 8;
 
-pub(crate) struct Walker<'src, 'c, 'f, S, const CONTROLLED: bool, R = NoRec> {
+pub(crate) struct Walker<'src, 'c, 'f, S, const CONTROLLED: bool, R = NoRec, T: TraceSink = NoTrace> {
     pub bytes: &'src [u8],
     pub pos: usize,
     pub strictness: Strictness,
@@ -111,10 +112,14 @@ pub(crate) struct Walker<'src, 'c, 'f, S, const CONTROLLED: bool, R = NoRec> {
     replaying: bool,
     scan: core::marker::PhantomData<S>,
     rec: R,
+    trace: T,
 }
 
+/// Root walk output: marks, end offset, early-stop flag, fused facts, trace.
+pub(crate) type RootScan<'src> = (Vec<Answer<'src>>, usize, bool, Vec<Fact<'src>>, Trace);
+
 #[allow(clippy::too_many_arguments, reason = "the walk's inputs are all independent")]
-pub(crate) fn scan_root<'src, const CONTROLLED: bool>(
+pub(crate) fn scan_root<'src, const CONTROLLED: bool, T: TraceSink>(
     bytes: &'src [u8],
     start: usize,
     demands: &[Demand],
@@ -124,24 +129,25 @@ pub(crate) fn scan_root<'src, const CONTROLLED: bool>(
     facts: &[Fact<'src>],
     allow_stop: bool,
     control: &Control,
-) -> Result<(Vec<Answer<'src>>, usize, bool), SmallErr> {
+    trace: T,
+) -> Result<(Vec<Answer<'src>>, usize, bool, Trace), SmallErr> {
     let retained = matches!(strictness, Strictness::Strict);
-    let (answers, end, stop, _) = if dialect == Dialect::Rfc8259 {
-        scan_root_with::<RfcScan, NoRec, CONTROLLED>(
-            bytes, start, demands, strictness, max, dialect, facts, allow_stop, retained, control,
+    let (answers, end, stop, _, trace) = if dialect == Dialect::Rfc8259 {
+        scan_root_with::<RfcScan, NoRec, CONTROLLED, T>(
+            bytes, start, demands, strictness, max, dialect, facts, allow_stop, retained, control, trace,
         )?
     } else {
-        scan_root_with::<DialectScan, NoRec, CONTROLLED>(
-            bytes, start, demands, strictness, max, dialect, facts, allow_stop, retained, control,
+        scan_root_with::<DialectScan, NoRec, CONTROLLED, T>(
+            bytes, start, demands, strictness, max, dialect, facts, allow_stop, retained, control, trace,
         )?
     };
-    Ok((answers, end, stop))
+    Ok((answers, end, stop, trace))
 }
 
 /// [`scan_root`] fused with the comment recorder: the walk records each trivia
 /// gap it skips and materializes the standalone collector's facts.
 #[allow(clippy::too_many_arguments, reason = "the walk's inputs are all independent")]
-pub(crate) fn scan_root_fused<'src, const CONTROLLED: bool>(
+pub(crate) fn scan_root_fused<'src, const CONTROLLED: bool, T: TraceSink>(
     bytes: &'src [u8],
     start: usize,
     demands: &[Demand],
@@ -150,9 +156,10 @@ pub(crate) fn scan_root_fused<'src, const CONTROLLED: bool>(
     dialect: Dialect,
     allow_stop: bool,
     control: &Control,
-) -> Result<(Vec<Answer<'src>>, usize, bool, Vec<Fact<'src>>), SmallErr> {
+    trace: T,
+) -> Result<RootScan<'src>, SmallErr> {
     let retained = matches!(strictness, Strictness::Strict);
-    scan_root_with::<DialectScan, Recorder, CONTROLLED>(
+    scan_root_with::<DialectScan, Recorder, CONTROLLED, T>(
         bytes,
         start,
         demands,
@@ -163,11 +170,12 @@ pub(crate) fn scan_root_fused<'src, const CONTROLLED: bool>(
         allow_stop,
         retained,
         control,
+        trace,
     )
 }
 
 #[allow(clippy::too_many_arguments, reason = "the walk's inputs are all independent")]
-fn scan_root_with<'src, S: Scan, R: RecordSink, const CONTROLLED: bool>(
+fn scan_root_with<'src, S: Scan, R: RecordSink, const CONTROLLED: bool, T: TraceSink>(
     bytes: &'src [u8],
     start: usize,
     demands: &[Demand],
@@ -178,9 +186,19 @@ fn scan_root_with<'src, S: Scan, R: RecordSink, const CONTROLLED: bool>(
     allow_stop: bool,
     retain_glyphs: bool,
     control: &Control,
-) -> Result<(Vec<Answer<'src>>, usize, bool, Vec<Fact<'src>>), SmallErr> {
-    let mut walker =
-        Walker::<S, CONTROLLED, R>::new(bytes, start, strictness, max, dialect, facts, retain_glyphs, control)?;
+    trace: T,
+) -> Result<RootScan<'src>, SmallErr> {
+    let mut walker = Walker::<S, CONTROLLED, R, T>::new(
+        bytes,
+        start,
+        strictness,
+        max,
+        dialect,
+        facts,
+        retain_glyphs,
+        control,
+        trace,
+    )?;
     walker.allow_stop = allow_stop;
     if walker.pos >= bytes.len() {
         return Err(error::expected_value(walker.pos));
@@ -190,7 +208,8 @@ fn scan_root_with<'src, S: Scan, R: RecordSink, const CONTROLLED: bool>(
     let hits = hits_for(demands);
     walker.walk_node(&hits, None, &mut marks)?;
     let facts = walker.rec.take_facts(bytes);
-    Ok((marks, walker.pos, walker.stop, facts))
+    let trace = walker.trace.take_trace();
+    Ok((marks, walker.pos, walker.stop, facts, trace))
 }
 
 fn hits_for(demands: &[Demand]) -> Vec<Hit<'_>> {
@@ -281,7 +300,9 @@ impl<'a> View<'a> {
     }
 }
 
-impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 'c, 'f, S, CONTROLLED, R> {
+impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool, T: TraceSink>
+    Walker<'src, 'c, 'f, S, CONTROLLED, R, T>
+{
     #[allow(clippy::too_many_arguments, reason = "the walk's inputs are all independent")]
     fn new(
         bytes: &'src [u8],
@@ -292,6 +313,7 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
         facts: &'f [Fact<'src>],
         retain_glyphs: bool,
         control: &'c Control,
+        trace: T,
     ) -> Result<Self, SmallErr> {
         let mut walker = Self {
             bytes,
@@ -313,16 +335,19 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
             replaying: false,
             scan: core::marker::PhantomData,
             rec: R::new(retain_glyphs),
+            trace,
         };
         walker.pos = S::skip_trivia(bytes, start, dialect)?;
         Ok(walker)
     }
 
     /// The host control poll: container and record boundaries only, never per
-    /// token. `CONTROLLED = false` folds this to `Ok(())` and drops the borrow.
+    /// token. An uncontrolled walk folds the check to `Ok(())` and records no
+    /// poll, so the trace counts control polls only when a control exists.
     #[inline(always)]
-    fn poll(&self, at: usize) -> Result<(), SmallErr> {
+    fn poll(&mut self, at: usize) -> Result<(), SmallErr> {
         if CONTROLLED {
+            self.trace.note_poll();
             check_control(self.control, at)
         } else {
             Ok(())
@@ -397,7 +422,10 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
     }
 
     fn skip_unread(&mut self) -> Result<(), SmallErr> {
-        self.pos = S::skip_value_at(self.bytes, self.pos, self.unread(), self.depth, self.max, self.dialect)?;
+        let start = self.pos;
+        let check = self.unread();
+        self.pos = S::skip_value_at(self.bytes, self.pos, check, self.depth, self.max, self.dialect)?;
+        self.trace.note_skip(start, self.pos, check_level(check));
         Ok(())
     }
 
@@ -431,7 +459,10 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
                 && child.iter().all(|h| matches!(h.view, View::Record))
                 && !matches!(self.bytes.get(self.pos), Some(b'[' | b'{'))
             {
-                self.pos = skip_scalar::<S>(self.bytes, self.pos, self.demanded(), self.max, self.dialect)?;
+                let start = self.pos;
+                let check = self.demanded();
+                self.pos = skip_scalar::<S>(self.bytes, self.pos, check, self.max, self.dialect)?;
+                self.trace.note_skip(start, self.pos, check_level(check));
                 return Ok(());
             }
             return self.walk_node(child, None, marks);
@@ -444,7 +475,9 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
         } else {
             self.unread()
         };
+        let start = self.pos;
         self.pos = S::skip_value_at(self.bytes, self.pos, check, self.depth, self.max, self.dialect)?;
+        self.trace.note_skip(start, self.pos, check_level(check));
         Ok(())
     }
 
@@ -515,12 +548,14 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
             let end = if self.pos > start && check == self.unread() {
                 self.pos
             } else {
-                match kind {
+                let end = match kind {
                     ValueKind::Array | ValueKind::Object => {
                         S::skip_value_at(self.bytes, start, check, self.depth, self.max, self.dialect)?
                     }
                     _ => skip_scalar::<S>(self.bytes, start, check, self.max, self.dialect)?,
-                }
+                };
+                self.trace.note_skip(start, end, check_level(check));
+                end
             };
             let span = ByteRange::try_new(start, end).expect("ordered");
             for h in here {
@@ -548,7 +583,9 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
                         element_terminal(h.view) || matches!(h.view, View::Oracle(Oracle::Count | Oracle::DescendCount))
                     }) =>
             {
-                let end = S::skip_value_at(self.bytes, start, self.demanded(), self.depth, self.max, self.dialect)?;
+                let check = self.demanded();
+                let end = S::skip_value_at(self.bytes, start, check, self.depth, self.max, self.dialect)?;
+                self.trace.note_skip(start, end, check_level(check));
                 for h in here {
                     if let View::Oracle(oracle) = h.view {
                         self.fill_oracle(h.idx, oracle, kind, start, false, marks)?;
@@ -562,6 +599,7 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
             _ => {
                 let check = self.demanded();
                 let end = skip_scalar::<S>(self.bytes, start, check, self.max, self.dialect)?;
+                self.trace.note_skip(start, end, check_level(check));
                 self.finish_terminal(here, start, end, kind, marks);
                 Ok(())
             }
@@ -628,6 +666,7 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
                         self.dialect,
                         control,
                     )?;
+                    self.trace.note_skip(start, end, check_level(count_check));
                     self.pos = end;
                     marks[idx] = Answer::Oracle(OracleAnswer::Count(n));
                 }
@@ -638,6 +677,7 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
             },
             Oracle::DescendCount => {
                 let (end, n) = S::skip_value_counting(self.bytes, start, check, self.max, self.dialect)?;
+                self.trace.note_skip(start, end, check_level(check));
                 self.pos = end;
                 marks[idx] = Answer::Oracle(OracleAnswer::Count(n));
             }
@@ -715,6 +755,7 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
             if let Some(need) = prefix
                 && idx >= need
             {
+                self.trace.note_stop(self.pos);
                 self.stop = true;
                 break;
             }
@@ -800,7 +841,10 @@ impl<'src, 'c, 'f, S: Scan, R: RecordSink, const CONTROLLED: bool> Walker<'src, 
         if self.bytes.get(self.pos) == Some(&b'{') {
             self.keep_object(wanted, hits, marks)
         } else {
-            self.pos = S::skip_value_at(self.bytes, self.pos, self.unread(), self.depth, self.max, self.dialect)?;
+            let start = self.pos;
+            let check = self.unread();
+            self.pos = S::skip_value_at(self.bytes, self.pos, check, self.depth, self.max, self.dialect)?;
+            self.trace.note_skip(start, self.pos, check_level(check));
             for h in hits {
                 if let Some(RowShape::Projected(fields)) = row_shape(h.view) {
                     push_absent_row(&mut marks[h.idx], fields, self.bytes);

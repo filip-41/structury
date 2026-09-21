@@ -26,7 +26,8 @@ future release is allowed to do.
   struct literals. The set includes `ScanRequest`, `EncodeOptions`,
   `EditOptions`, `MaterializeOptions`, `ScanResult`, `Issue`, `Form`,
   `Materialized`, `JsonInput`, `Indent`, `ItemFraming`, `Source`,
-  `OracleAnswer`, `ErrorClass`, `NumericError`, and `Dialect`.
+  `OracleAnswer`, `ErrorClass`, `NumericError`, `Dialect`, `Trace`,
+  `TraceCounters`, `TraceEvent`, `AnswerKind`, and `CheckLevel`.
 
 The rule of thumb asks whether a codec needs to know every variant to stay
 correct. If the answer is yes, the enum is closed and a variant add is

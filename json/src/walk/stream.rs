@@ -1,7 +1,7 @@
 use super::{
     Answer, ByteRange, ColumnCell, Columns, Control, Demand, Dialect, DialectScan, Fact, Hit, NO_CONTROL, NoRec,
-    RecordSink, RfcScan, RowLaw, RowShape, Scan, SmallErr, Strictness, String, Vec, Walker, Wanted, error,
-    flatten_here, hits_for, push_absent_row, row_fields, row_shape,
+    NoTrace, RecordSink, RfcScan, RowLaw, RowShape, Scan, SmallErr, Strictness, String, Trace, TraceSink, Vec, Walker,
+    Wanted, error, flatten_here, hits_for, push_absent_row, row_fields, row_shape,
 };
 
 /// One walk over a run of element values, as the body of an array with no
@@ -48,6 +48,7 @@ fn scan_element_run_with<'src, S: Scan>(
         facts,
         retained,
         &NO_CONTROL,
+        NoTrace,
     )?;
     let mut marks = alloc::vec![Answer::Missing; demands.len()];
     let hits = hits_for(demands);
@@ -77,16 +78,16 @@ fn is_row_view(demand: &Demand) -> bool {
 /// Persistent per-record walk state for a framed stream, one consumer per
 /// [`Scan`] strategy. Allocations scale with the demand set, not the record
 /// count.
-pub(crate) enum StreamWalker<'src, 'c, 'd, 'f, const CONTROLLED: bool> {
+pub(crate) enum StreamWalker<'src, 'c, 'd, 'f, const CONTROLLED: bool, T: TraceSink = NoTrace> {
     /// RFC 8259 byte-level strategy.
-    Rfc(StreamState<'src, 'c, 'd, 'f, RfcScan, CONTROLLED>),
+    Rfc(StreamState<'src, 'c, 'd, 'f, RfcScan, CONTROLLED, T>),
     /// Dialect (lexer) strategy.
-    Dialect(StreamState<'src, 'c, 'd, 'f, DialectScan, CONTROLLED>),
+    Dialect(StreamState<'src, 'c, 'd, 'f, DialectScan, CONTROLLED, T>),
 }
 
 /// The per-strategy state behind [`StreamWalker`].
-pub(crate) struct StreamState<'src, 'c, 'd, 'f, S, const CONTROLLED: bool> {
-    walker: Walker<'src, 'c, 'f, S, CONTROLLED, NoRec>,
+pub(crate) struct StreamState<'src, 'c, 'd, 'f, S, const CONTROLLED: bool, T: TraceSink = NoTrace> {
+    walker: Walker<'src, 'c, 'f, S, CONTROLLED, NoRec, T>,
     hits: Vec<Hit<'d>>,
     active_hits: Vec<Hit<'d>>,
     /// The one row law per per-record demand, derived from the array-level
@@ -97,7 +98,7 @@ pub(crate) struct StreamState<'src, 'c, 'd, 'f, S, const CONTROLLED: bool> {
     marks: Vec<Answer<'src>>,
 }
 
-impl<'src, 'c, 'd, 'f, const CONTROLLED: bool> StreamWalker<'src, 'c, 'd, 'f, CONTROLLED> {
+impl<'src, 'c, 'd, 'f, const CONTROLLED: bool, T: TraceSink> StreamWalker<'src, 'c, 'd, 'f, CONTROLLED, T> {
     #[allow(clippy::too_many_arguments, reason = "the walk's inputs are all independent")]
     pub(crate) fn new(
         bytes: &'src [u8],
@@ -109,6 +110,7 @@ impl<'src, 'c, 'd, 'f, const CONTROLLED: bool> StreamWalker<'src, 'c, 'd, 'f, CO
         dialect: Dialect,
         facts: &'f [Fact<'src>],
         control: &'c Control,
+        trace: T,
     ) -> Result<Self, SmallErr> {
         let hits = hits_for(demands);
         // `walk_object`/`keep_array` flatten hits before matching members, so the
@@ -118,11 +120,11 @@ impl<'src, 'c, 'd, 'f, const CONTROLLED: bool> StreamWalker<'src, 'c, 'd, 'f, CO
         let retained = matches!(strictness, Strictness::Strict);
         if dialect == Dialect::Rfc8259 {
             Ok(Self::Rfc(StreamState::new(
-                bytes, hits, laws, wanted, owners, strictness, max, dialect, facts, retained, control,
+                bytes, hits, laws, wanted, owners, strictness, max, dialect, facts, retained, control, trace,
             )?))
         } else {
             Ok(Self::Dialect(StreamState::new(
-                bytes, hits, laws, wanted, owners, strictness, max, dialect, facts, retained, control,
+                bytes, hits, laws, wanted, owners, strictness, max, dialect, facts, retained, control, trace,
             )?))
         }
     }
@@ -145,9 +147,17 @@ impl<'src, 'c, 'd, 'f, const CONTROLLED: bool> StreamWalker<'src, 'c, 'd, 'f, CO
             Self::Dialect(state) => state.fold(acc),
         }
     }
+
+    /// Drain this walker's trace (stream extras merge it into the main trace).
+    pub(crate) fn take_trace(&mut self) -> Trace {
+        match self {
+            Self::Rfc(state) => state.walker.trace.take_trace(),
+            Self::Dialect(state) => state.walker.trace.take_trace(),
+        }
+    }
 }
 
-impl<'src, 'c, 'd, 'f, S: Scan, const CONTROLLED: bool> StreamState<'src, 'c, 'd, 'f, S, CONTROLLED> {
+impl<'src, 'c, 'd, 'f, S: Scan, const CONTROLLED: bool, T: TraceSink> StreamState<'src, 'c, 'd, 'f, S, CONTROLLED, T> {
     #[allow(clippy::too_many_arguments, reason = "the walk's inputs are all independent")]
     fn new(
         bytes: &'src [u8],
@@ -161,8 +171,11 @@ impl<'src, 'c, 'd, 'f, S: Scan, const CONTROLLED: bool> StreamState<'src, 'c, 'd
         facts: &'f [Fact<'src>],
         retained: bool,
         control: &'c Control,
+        trace: T,
     ) -> Result<Self, SmallErr> {
-        let walker = Walker::<S, CONTROLLED, NoRec>::new(bytes, 0, strictness, max, dialect, facts, retained, control)?;
+        let walker = Walker::<S, CONTROLLED, NoRec, T>::new(
+            bytes, 0, strictness, max, dialect, facts, retained, control, trace,
+        )?;
         let marks = laws.iter().map(|law| seed_mark(bytes, law.as_ref())).collect();
         Ok(Self {
             walker,
@@ -338,8 +351,8 @@ pub(super) fn next_run_value<S: Scan>(
     Ok(true)
 }
 
-pub(super) fn replay_element<'src, S: Scan, R: RecordSink, const CONTROLLED: bool>(
-    walker: &mut Walker<'src, '_, '_, S, CONTROLLED, R>,
+pub(super) fn replay_element<'src, S: Scan, R: RecordSink, const CONTROLLED: bool, T: TraceSink>(
+    walker: &mut Walker<'src, '_, '_, S, CONTROLLED, R, T>,
     span: ByteRange,
     hit: Hit<'_>,
     marks: &mut [Answer<'src>],

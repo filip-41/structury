@@ -28,6 +28,7 @@ mod materialize;
 mod scan;
 mod shard;
 mod tape;
+mod trace;
 mod walk;
 
 pub use dialect::Dialect;
@@ -38,8 +39,12 @@ pub use encode_parallel::{
 };
 pub use framing::{adjacent_prefix_len, complete_prefix_len, partition_adjacent, partition_json_seq, partition_ndjson};
 pub use materialize::{Form, MaterializeOptions, Materialized, materialize, parse};
-pub use scan::{JsonInput, ScanRequest, scan, scan_controlled, scan_each, scan_each_with_issues, validate};
+pub use scan::{
+    JsonInput, ScanRequest, scan, scan_controlled, scan_each, scan_each_with_issues, scan_traced,
+    scan_traced_controlled, validate,
+};
 pub use shard::{CutSummary, FIRST_SHARD_BYTES, Plan};
+pub use trace::{AnswerKind, CheckLevel, Trace, TraceCounters, TraceEvent};
 
 pub use lex::MAX_NESTING;
 
